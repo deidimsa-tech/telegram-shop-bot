@@ -250,7 +250,68 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data.startswith("upload_"):
+     if data.startswith("buy_"):
+    product_id = int(data.split("_")[1])
+
+    if product_id not in PRODUCTS:
+        return
+
+    name, price = PRODUCTS[product_id]
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "💵 GRYNIEJI PINIGAI",
+            callback_data=f"cash_{product_id}"
+        )],
+        [InlineKeyboardButton(
+            "⬅️ GRĮŽTI",
+            callback_data="catalog"
+        )]
+    ])
+
+    await query.edit_message_text(
+        f"💎 LEDAS\n\n"
+        f"Pasirinkta prekė: {name}\n"
+        f"Kaina: {price}\n\n"
+        f"Pasirinkite mokėjimo būdą:",
+        reply_markup=keyboard
+    )
+    return
+
+if data.startswith("cash_"):
+    product_id = int(data.split("_")[1])
+
+    if product_id not in PRODUCTS:
+        return
+
+    name, price = PRODUCTS[product_id]
+
+    with connect() as db:
+        cursor = db.execute(
+            "INSERT INTO orders (user_id, product, status) "
+            "VALUES (?, ?, ?)",
+            (user_id, product_id, "LAUKIA APMOKĖJIMO")
+        )
+        order_id = cursor.lastrowid
+
+    await query.edit_message_text(
+        f"✅ UŽSAKYMAS #{order_id}\n\n"
+        f"Prekė: {name}\n"
+        f"Kaina: {price}\n"
+        f"Mokėjimas: 💵 Grynieji pinigai\n\n"
+        f"Administratorius susisieks dėl apmokėjimo.\n"
+        f"Prekė bus pristatyta patvirtinus mokėjimą."
+    )
+
+    await context.bot.send_message(
+        OWNER_ID,
+        f"🛍️ NAUJAS UŽSAKYMAS #{order_id}\n"
+        f"Kliento ID: {user_id}\n"
+        f"Prekė: {name} – {price}\n"
+        f"Mokėjimas: Grynieji pinigai\n"
+        f"Patvirtinimas: /admin"
+    )
+    return data.startswith("upload_"):
         category = int(data.split("_")[1])
         context.user_data["upload_category"] = category
 
