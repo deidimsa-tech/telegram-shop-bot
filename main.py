@@ -315,7 +315,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         category_key = next(
             (
-                key for key, (, ids) in CATEGORIES.items()
+                key for key, (_, ids) in CATEGORIES.items()
                 if product_id in ids
             ),
             None
