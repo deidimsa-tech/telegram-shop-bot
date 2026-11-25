@@ -850,3 +850,6 @@ def main():
 
 
 if name == "__main
+:
+main()
+:::
