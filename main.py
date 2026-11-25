@@ -45,6 +45,7 @@ def setup_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS stock (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,22 +61,40 @@ def is_owner(user_id):
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛍️ PREKIŲ KATALOGAS", callback_data="catalog")],
-        [InlineKeyboardButton("📦 MANO UŽSAKYMAI", callback_data="myorders")],
+        [InlineKeyboardButton(
+            "🛍️ PREKIŲ KATALOGAS",
+            callback_data="catalog"
+        )],
+        [InlineKeyboardButton(
+            "📦 MANO UŽSAKYMAI",
+            callback_data="myorders"
+        )],
     ])
 
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 UŽSAKYMAI", callback_data="admin_orders")],
-        [InlineKeyboardButton("📸 ĮKELTI PREKES", callback_data="upload_menu")],
-        [InlineKeyboardButton("📊 PREKIŲ LIKUTIS", callback_data="stock")],
+        [InlineKeyboardButton(
+            "📦 UŽSAKYMAI",
+            callback_data="admin_orders"
+        )],
+        [InlineKeyboardButton(
+            "📸 ĮKELTI PREKES",
+            callback_data="upload_menu"
+        )],
+        [InlineKeyboardButton(
+            "📊 PREKIŲ LIKUTIS",
+            callback_data="stock"
+        )],
     ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Sveiki atvykę į LEDAS 💎!\n\n"
+        "💎 LEDAS\n\n"
+        "Sveiki atvykę į LEDAS!\n\n"
+        "✨ Išskirtinės prekės.\n"
+        "💎 Greitas pristatymas.\n\n"
         "Pasirinkite, ką norite daryti:",
         reply_markup=main_keyboard()
     )
@@ -103,7 +122,8 @@ async def show_catalog(query):
         ])
 
     await query.edit_message_text(
-        "🛍️ PREKIŲ KATALOGAS\n\nPasirinkite prekę:",
+        "💎 LEDAS | PREKIŲ KATALOGAS\n\n"
+        "Pasirinkite norimą prekę:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -127,6 +147,7 @@ async def show_orders(query, user_id):
 
     for order_id, product, status in orders:
         name, price = PRODUCTS[product]
+
         text += (
             f"Užsakymas #{order_id}\n"
             f"Prekė: {name} – {price}\n"
@@ -146,6 +167,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
+    # CUSTOMER MENU
+
     if data == "catalog":
         await show_catalog(query)
         return
@@ -154,11 +177,45 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_orders(query, user_id)
         return
 
+    # PRODUCT SELECTION
+
     if data.startswith("buy_"):
         product_id = int(data.split("_")[1])
 
         if product_id not in PRODUCTS:
             return
+
+        name, price = PRODUCTS[product_id]
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "💵 GRYNIEJI PINIGAI",
+                callback_data=f"cash_{product_id}"
+            )],
+            [InlineKeyboardButton(
+                "⬅️ GRĮŽTI",
+                callback_data="catalog"
+            )]
+        ])
+
+        await query.edit_message_text(
+            "💎 LEDAS\n\n"
+            f"Pasirinkta prekė: {name}\n"
+            f"Kaina: {price}\n\n"
+            "Pasirinkite mokėjimo būdą:",
+            reply_markup=keyboard
+        )
+        return
+
+    # CASH PAYMENT
+
+    if data.startswith("cash_"):
+        product_id = int(data.split("_")[1])
+
+        if product_id not in PRODUCTS:
+            return
+
+        name, price = PRODUCTS[product_id]
 
         with connect() as db:
             cursor = db.execute(
@@ -166,17 +223,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "VALUES (?, ?, ?)",
                 (user_id, product_id, "LAUKIA APMOKĖJIMO")
             )
+
             order_id = cursor.lastrowid
 
-        name, price = PRODUCTS[product_id]
-
         await query.edit_message_text(
-            f"✅ Užsakymas #{order_id} sukurtas!\n\n"
+            f"💎 LEDAS\n\n"
+            f"✅ UŽSAKYMAS #{order_id}\n\n"
             f"Prekė: {name}\n"
-            f"Kaina: {price}\n\n"
-            "Apmokėjimą patvirtina administratorius.\n"
-            "Atsiųskite mokėjimo patvirtinimą šiam botui.\n\n"
-            "Jei turite klausimų, parašykite žinutę čia."
+            f"Kaina: {price}\n"
+            f"Mokėjimas: 💵 Grynieji pinigai\n\n"
+            "Administratorius susisieks dėl apmokėjimo.\n"
+            "Prekė bus pristatyta patvirtinus mokėjimą."
         )
 
         try:
@@ -185,12 +242,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🛍️ NAUJAS UŽSAKYMAS #{order_id}\n"
                 f"Kliento ID: {user_id}\n"
                 f"Prekė: {name} – {price}\n"
-                f"Patvirtinimui naudokite /admin."
+                f"Mokėjimas: Grynieji pinigai\n"
+                f"Patvirtinimas: /admin"
             )
         except Exception:
             pass
 
         return
+
+    # ADMIN ONLY
 
     if not is_owner(user_id):
         return
@@ -237,6 +297,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Užsakymai išsiųsti.")
         return
 
+    # PHOTO UPLOAD MENU
+
     if data == "upload_menu":
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("1 💎", callback_data="upload_1")],
@@ -250,69 +312,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-     if data.startswith("buy_"):
-    product_id = int(data.split("_")[1])
-
-    if product_id not in PRODUCTS:
-        return
-
-    name, price = PRODUCTS[product_id]
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "💵 GRYNIEJI PINIGAI",
-            callback_data=f"cash_{product_id}"
-        )],
-        [InlineKeyboardButton(
-            "⬅️ GRĮŽTI",
-            callback_data="catalog"
-        )]
-    ])
-
-    await query.edit_message_text(
-        f"💎 LEDAS\n\n"
-        f"Pasirinkta prekė: {name}\n"
-        f"Kaina: {price}\n\n"
-        f"Pasirinkite mokėjimo būdą:",
-        reply_markup=keyboard
-    )
-    return
-
-if data.startswith("cash_"):
-    product_id = int(data.split("_")[1])
-
-    if product_id not in PRODUCTS:
-        return
-
-    name, price = PRODUCTS[product_id]
-
-    with connect() as db:
-        cursor = db.execute(
-            "INSERT INTO orders (user_id, product, status) "
-            "VALUES (?, ?, ?)",
-            (user_id, product_id, "LAUKIA APMOKĖJIMO")
-        )
-        order_id = cursor.lastrowid
-
-    await query.edit_message_text(
-        f"✅ UŽSAKYMAS #{order_id}\n\n"
-        f"Prekė: {name}\n"
-        f"Kaina: {price}\n"
-        f"Mokėjimas: 💵 Grynieji pinigai\n\n"
-        f"Administratorius susisieks dėl apmokėjimo.\n"
-        f"Prekė bus pristatyta patvirtinus mokėjimą."
-    )
-
-    await context.bot.send_message(
-        OWNER_ID,
-        f"🛍️ NAUJAS UŽSAKYMAS #{order_id}\n"
-        f"Kliento ID: {user_id}\n"
-        f"Prekė: {name} – {price}\n"
-        f"Mokėjimas: Grynieji pinigai\n"
-        f"Patvirtinimas: /admin"
-    )
-    return data.startswith("upload_"):
+    if data.startswith("upload_"):
         category = int(data.split("_")[1])
+
         context.user_data["upload_category"] = category
 
         await query.edit_message_text(
@@ -320,6 +322,8 @@ if data.startswith("cash_"):
             "Galite siųsti po vieną nuotrauką."
         )
         return
+
+    # STOCK
 
     if data == "stock":
         with connect() as db:
@@ -338,6 +342,8 @@ if data.startswith("cash_"):
             reply_markup=admin_keyboard()
         )
         return
+
+    # APPROVE ORDER
 
     if data.startswith("approve_"):
         order_id = int(data.split("_")[1])
@@ -368,13 +374,19 @@ if data.startswith("cash_"):
 
             if photo:
                 photo_id, filename = photo
-                db.execute("DELETE FROM stock WHERE id=?", (photo_id,))
+
+                db.execute(
+                    "DELETE FROM stock WHERE id=?",
+                    (photo_id,)
+                )
+
                 db.execute(
                     "UPDATE orders SET status=? WHERE id=?",
                     ("PRISTATYTA", order_id)
                 )
             else:
                 filename = None
+
                 db.execute(
                     "UPDATE orders SET status=? WHERE id=?",
                     ("APMOKĖTA – LAUKIA PREKĖS", order_id)
@@ -388,7 +400,10 @@ if data.startswith("cash_"):
                     await context.bot.send_photo(
                         customer_id,
                         photo=photo_file,
-                        caption="✅ Jūsų užsakymas pristatytas! Ačiū, kad pirkote LEDAS 💎!"
+                        caption=(
+                            "✅ Jūsų užsakymas pristatytas!\n"
+                            "Ačiū, kad pirkote LEDAS 💎!"
+                        )
                     )
 
                 path.unlink(missing_ok=True)
@@ -399,7 +414,8 @@ if data.startswith("cash_"):
 
             except Exception:
                 await query.edit_message_text(
-                    "⚠️ Nepavyko išsiųsti prekės. Patikrinkite žurnalus."
+                    "⚠️ Nepavyko išsiųsti prekės. "
+                    "Patikrinkite žurnalus."
                 )
 
         else:
@@ -410,10 +426,13 @@ if data.startswith("cash_"):
             )
 
             await query.edit_message_text(
-                f"⚠️ Užsakymas #{order_id} apmokėtas, bet trūksta nuotraukų."
+                f"⚠️ Užsakymas #{order_id} apmokėtas, "
+                "bet trūksta nuotraukų."
             )
 
         return
+
+    # REJECT ORDER
 
     if data.startswith("reject_"):
         order_id = int(data.split("_")[1])
@@ -500,7 +519,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not order:
         await message.reply_text(
-            "Norėdami susisiekti su administratoriumi, pirmiausia sukurkite užsakymą."
+            "Norėdami susisiekti su administratoriumi, "
+            "pirmiausia sukurkite užsakymą."
         )
         return
 
@@ -516,10 +536,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Atsakyti: /reply {order_id} jūsų žinutė"
         )
 
-        await message.reply_text("✅ Jūsų žinutė išsiųsta administratoriui.")
+        await message.reply_text(
+            "✅ Jūsų žinutė išsiųsta administratoriui."
+        )
 
     except Exception:
-        await message.reply_text("Nepavyko išsiųsti žinutės. Bandykite vėliau.")
+        await message.reply_text(
+            "Nepavyko išsiųsti žinutės. Bandykite vėliau."
+        )
 
 
 async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,7 +559,9 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         order_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Neteisingas užsakymo numeris.")
+        await update.message.reply_text(
+            "Neteisingas užsakymo numeris."
+        )
         return
 
     text = " ".join(context.args[1:])
@@ -573,6 +599,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         message_handler
