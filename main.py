@@ -130,7 +130,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "👑 LEDAS ADMIN PANELĖ",
+        "🔵🔴 PEPSI ADMIN PANELĖ",
         reply_markup=admin_keyboard()
     )
 
