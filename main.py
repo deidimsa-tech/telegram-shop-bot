@@ -1,28 +1,27 @@
 import os
-import io
-import logging
+import sqlite3
 import random
+from pathlib import Path
 
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, InputFile
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
-from supabase import create_client
 
-logging.basicConfig(level=logging.INFO)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "6957346235"))
 
-TOKEN = os.environ["BOT_TOKEN"]
-OWNER_ID = int(os.environ["OWNER_ID"])
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+PHOTO_DIR = DATA_DIR / "photos"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-BUCKET = "product-photos"
+DB = DATA_DIR / "ledas.db"
 
 PRODUCTS = {
     1: ("1 💎", "35 €"),
@@ -31,451 +30,503 @@ PRODUCTS = {
 }
 
 
-def is_admin(user_id):
+def connect():
+    return sqlite3.connect(DB)
+
+
+def setup_database():
+    with connect() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                product INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS stock (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category INTEGER NOT NULL,
+                filename TEXT NOT NULL
+            )
+        """)
+
+
+def is_owner(user_id):
     return user_id == OWNER_ID
 
 
-def main_menu():
-    return ReplyKeyboardMarkup(
-        [
-            ["🛍️ PREKIŲ KATALOGAS"],
-            ["📦 MANO UŽSAKYMAI"]
-        ],
-        resize_keyboard=True
-    )
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛍️ PREKIŲ KATALOGAS", callback_data="catalog")],
+        [InlineKeyboardButton("📦 MANO UŽSAKYMAI", callback_data="myorders")],
+    ])
 
 
-def admin_menu():
-    return ReplyKeyboardMarkup(
-        [
-            ["📦 UŽSAKYMAI", "📸 NUOTRAUKŲ LIKUTIS"],
-            ["➕ ĮKELTI 1 💎", "➕ ĮKELTI 2 💎"],
-            ["➕ ĮKELTI 5 💎", "⬅️ PAGRINDINIS MENIU"]
-        ],
-        resize_keyboard=True
-    )
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 UŽSAKYMAI", callback_data="admin_orders")],
+        [InlineKeyboardButton("📸 ĮKELTI PREKES", callback_data="upload_menu")],
+        [InlineKeyboardButton("📊 PREKIŲ LIKUTIS", callback_data="stock")],
+    ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Sveiki atvykę į LEDAS 💎 parduotuvę!",
-        reply_markup=main_menu()
+        "Sveiki atvykę į LEDAS 💎!\n\n"
+        "Pasirinkite, ką norite daryti:",
+        reply_markup=main_keyboard()
     )
 
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_owner(update.effective_user.id):
         return
 
     await update.message.reply_text(
-        "💎 LEDAS ADMINISTRATORIUS",
-        reply_markup=admin_menu()
+        "👑 LEDAS ADMIN PANELĖ",
+        reply_markup=admin_keyboard()
     )
 
 
-async def show_catalog(update):
-    rows = supabase.table("products").select("*").order("id").execute().data
-
+async def show_catalog(query):
     buttons = []
 
-    for product in rows:
+    for product_id, (name, price) in PRODUCTS.items():
         buttons.append([
             InlineKeyboardButton(
-                f"{product['name']} – {product['price']}",
-                callback_data=f"product_{product['id']}"
+                f"{name} – {price}",
+                callback_data=f"buy_{product_id}"
             )
         ])
 
-    await update.message.reply_text(
+    await query.edit_message_text(
         "🛍️ PREKIŲ KATALOGAS\n\nPasirinkite prekę:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_orders(query, user_id):
+    with connect() as db:
+        orders = db.execute(
+            "SELECT id, product, status FROM orders "
+            "WHERE user_id=? ORDER BY id DESC",
+            (user_id,)
+        ).fetchall()
+
+    if not orders:
+        await query.edit_message_text(
+            "📦 Jūs dar neturite užsakymų.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    text = "📦 MANO UŽSAKYMAI\n\n"
+
+    for order_id, product, status in orders:
+        name, price = PRODUCTS[product]
+        text += (
+            f"Užsakymas #{order_id}\n"
+            f"Prekė: {name} – {price}\n"
+            f"Būsena: {status}\n\n"
+        )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=main_keyboard()
+    )
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    user_id = query.from_user.id
     data = query.data
 
-    if data.startswith("product_"):
-        pid = int(data.split("_")[1])
+    if data == "catalog":
+        await show_catalog(query)
+        return
 
-        product = supabase.table("products").select("*").eq(
-            "id", pid
-        ).execute().data
+    if data == "myorders":
+        await show_orders(query, user_id)
+        return
 
-        if not product:
-            await query.message.reply_text("Prekė nerasta.")
+    if data.startswith("buy_"):
+        product_id = int(data.split("_")[1])
+
+        if product_id not in PRODUCTS:
             return
 
-        p = product[0]
+        with connect() as db:
+            cursor = db.execute(
+                "INSERT INTO orders (user_id, product, status) "
+                "VALUES (?, ?, ?)",
+                (user_id, product_id, "LAUKIA APMOKĖJIMO")
+            )
+            order_id = cursor.lastrowid
+
+        name, price = PRODUCTS[product_id]
 
         await query.edit_message_text(
-            f"💎 {p['name']}\n"
-            f"💶 Kaina: {p['price']}\n\n"
-            "Norite užsakyti šią prekę?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🛒 UŽSAKYTI",
-                    callback_data=f"order_{pid}"
-                )]
-            ])
+            f"✅ Užsakymas #{order_id} sukurtas!\n\n"
+            f"Prekė: {name}\n"
+            f"Kaina: {price}\n\n"
+            "Apmokėjimą patvirtina administratorius.\n"
+            "Atsiųskite mokėjimo patvirtinimą šiam botui.\n\n"
+            "Jei turite klausimų, parašykite žinutę čia."
         )
-
-    elif data.startswith("order_"):
-        pid = int(data.split("_")[1])
-
-        product = supabase.table("products").select("*").eq(
-            "id", pid
-        ).execute().data[0]
-
-        result = supabase.table("orders").insert({
-            "user_id": query.from_user.id,
-            "product": pid,
-            "status": "LAUKIA APMOKĖJIMO"
-        }).execute()
-
-        order_id = result.data[0]["id"]
-
-        await query.edit_message_text(
-            f"✅ Užsakymas #{order_id} pateiktas!\n\n"
-            f"Prekė: {product['name']}\n"
-            f"Kaina: {product['price']}\n\n"
-            "🟡 Laukiama apmokėjimo.\n"
-            "Susisieksime su jumis per šį botą."
-        )
-
-        await context.bot.send_message(
-            OWNER_ID,
-            f"🛍️ NAUJAS UŽSAKYMAS #{order_id}\n"
-            f"Klientas: {query.from_user.id}\n"
-            f"Prekė: {product['name']} – {product['price']}\n\n"
-            f"Atsakymas klientui: /reply {order_id} Jūsų žinutė",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "✅ PATVIRTINTI APMOKĖJIMĄ",
-                    callback_data=f"approve_{order_id}"
-                )],
-                [InlineKeyboardButton(
-                    "❌ ATMESTI UŽSAKYMĄ",
-                    callback_data=f"reject_{order_id}"
-                )]
-            ])
-        )
-
-    elif data.startswith("approve_"):
-        if not is_admin(query.from_user.id):
-            return
-
-        order_id = int(data.split("_")[1])
-
-        orders = supabase.table("orders").select("*").eq(
-            "id", order_id
-        ).execute().data
-
-        if not orders or orders[0]["status"] != "LAUKIA APMOKĖJIMO":
-            await query.message.reply_text("Užsakymas jau apdorotas.")
-            return
-
-        order = orders[0]
-        category = order["product"]
-
-        photos = supabase.table("stock").select("*").eq(
-            "category", category
-        ).execute().data
-
-        if not photos:
-            supabase.table("orders").update({
-                "status": "APMOKĖTA – LAUKIA PREKĖS"
-            }).eq("id", order_id).execute()
-
-            await query.message.reply_text(
-                "⚠️ Apmokėjimas patvirtintas, tačiau šios kategorijos "
-                "nuotraukų atsargos tuščios.\n"
-                "Įkelkite nuotrauką, kad galėtumėte pristatyti užsakymą."
-            )
-
-            await context.bot.send_message(
-                order["user_id"],
-                "✅ Apmokėjimas patvirtintas!\n"
-                "Jūsų prekė ruošiama ir bus pristatyta netrukus."
-            )
-            return
-
-        photo = random.choice(photos)
-        path = photo["storage_path"]
 
         try:
-            image_data = supabase.storage.from_(BUCKET).download(path)
-
-            await context.bot.send_photo(
-                chat_id=order["user_id"],
-                photo=InputFile(
-                    io.BytesIO(image_data),
-                    filename="ledas.jpg"
-                ),
-                caption="💎 Jūsų užsakymas pristatytas! Ačiū!"
+            await context.bot.send_message(
+                OWNER_ID,
+                f"🛍️ NAUJAS UŽSAKYMAS #{order_id}\n"
+                f"Kliento ID: {user_id}\n"
+                f"Prekė: {name} – {price}\n"
+                f"Patvirtinimui naudokite /admin."
             )
-
-            # Remove delivered photo from storage and stock.
-            supabase.storage.from_(BUCKET).remove([path])
-
-            supabase.table("stock").delete().eq(
-                "id", photo["id"]
-            ).execute()
-
-            supabase.table("orders").update({
-                "status": "APMOKĖTA – PRISTATYTA"
-            }).eq("id", order_id).execute()
-
-            await query.message.reply_text(
-                f"✅ Užsakymas #{order_id} pristatytas!"
-            )
-
         except Exception:
-            logging.exception("Delivery failed")
-            await query.message.reply_text(
-                "❌ Nepavyko pristatyti nuotraukos. "
-                "Atsargos nepašalintos. Patikrinkite klaidą."
-            )
+            pass
 
-    elif data.startswith("reject_"):
-        if not is_admin(query.from_user.id):
+        return
+
+    if not is_owner(user_id):
+        return
+
+    if data == "admin_orders":
+        with connect() as db:
+            orders = db.execute(
+                "SELECT id, user_id, product, status "
+                "FROM orders ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+
+        if not orders:
+            await query.edit_message_text(
+                "Užsakymų nėra.",
+                reply_markup=admin_keyboard()
+            )
             return
 
-        order_id = int(data.split("_")[1])
+        for order_id, customer_id, product, status in orders:
+            name, price = PRODUCTS[product]
 
-        orders = supabase.table("orders").select("*").eq(
-            "id", order_id
-        ).execute().data
-
-        if orders:
-            supabase.table("orders").update({
-                "status": "ATMESTAS"
-            }).eq("id", order_id).execute()
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ PATVIRTINTI",
+                        callback_data=f"approve_{order_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ ATMESTI",
+                        callback_data=f"reject_{order_id}"
+                    )
+                ]
+            ])
 
             await context.bot.send_message(
-                orders[0]["user_id"],
-                "❌ Jūsų užsakymas atmestas."
+                OWNER_ID,
+                f"UŽSAKYMAS #{order_id}\n"
+                f"Klientas: {customer_id}\n"
+                f"Prekė: {name} – {price}\n"
+                f"Būsena: {status}",
+                reply_markup=keyboard
             )
 
-            await query.message.reply_text(
-                f"Užsakymas #{order_id} atmestas."
+        await query.edit_message_text("Užsakymai išsiųsti.")
+        return
+
+    if data == "upload_menu":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("1 💎", callback_data="upload_1")],
+            [InlineKeyboardButton("2 💎", callback_data="upload_2")],
+            [InlineKeyboardButton("5 💎", callback_data="upload_3")],
+        ])
+
+        await query.edit_message_text(
+            "Pasirinkite, kurios prekės nuotraukas įkelti:",
+            reply_markup=keyboard
+        )
+        return
+
+    if data.startswith("upload_"):
+        category = int(data.split("_")[1])
+        context.user_data["upload_category"] = category
+
+        await query.edit_message_text(
+            f"📸 Dabar siųskite {PRODUCTS[category][0]} nuotraukas.\n"
+            "Galite siųsti po vieną nuotrauką."
+        )
+        return
+
+    if data == "stock":
+        with connect() as db:
+            counts = db.execute(
+                "SELECT category, COUNT(*) FROM stock GROUP BY category"
+            ).fetchall()
+
+        stock_counts = dict(counts)
+        text = "📊 PREKIŲ LIKUTIS\n\n"
+
+        for product_id, (name, price) in PRODUCTS.items():
+            text += f"{name}: {stock_counts.get(product_id, 0)} vnt.\n"
+
+        await query.edit_message_text(
+            text,
+            reply_markup=admin_keyboard()
+        )
+        return
+
+    if data.startswith("approve_"):
+        order_id = int(data.split("_")[1])
+
+        with connect() as db:
+            order = db.execute(
+                "SELECT user_id, product, status FROM orders WHERE id=?",
+                (order_id,)
+            ).fetchone()
+
+            if not order:
+                await query.edit_message_text("Užsakymas nerastas.")
+                return
+
+            customer_id, product_id, status = order
+
+            if status != "LAUKIA APMOKĖJIMO":
+                await query.edit_message_text(
+                    f"Užsakymas jau apdorotas: {status}"
+                )
+                return
+
+            photo = db.execute(
+                "SELECT id, filename FROM stock "
+                "WHERE category=? ORDER BY RANDOM() LIMIT 1",
+                (product_id,)
+            ).fetchone()
+
+            if photo:
+                photo_id, filename = photo
+                db.execute("DELETE FROM stock WHERE id=?", (photo_id,))
+                db.execute(
+                    "UPDATE orders SET status=? WHERE id=?",
+                    ("PRISTATYTA", order_id)
+                )
+            else:
+                filename = None
+                db.execute(
+                    "UPDATE orders SET status=? WHERE id=?",
+                    ("APMOKĖTA – LAUKIA PREKĖS", order_id)
+                )
+
+        if filename:
+            path = PHOTO_DIR / filename
+
+            try:
+                with open(path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        customer_id,
+                        photo=photo_file,
+                        caption="✅ Jūsų užsakymas pristatytas! Ačiū, kad pirkote LEDAS 💎!"
+                    )
+
+                path.unlink(missing_ok=True)
+
+                await query.edit_message_text(
+                    f"✅ Užsakymas #{order_id} pristatytas."
+                )
+
+            except Exception:
+                await query.edit_message_text(
+                    "⚠️ Nepavyko išsiųsti prekės. Patikrinkite žurnalus."
+                )
+
+        else:
+            await context.bot.send_message(
+                customer_id,
+                "✅ Mokėjimas patvirtintas!\n"
+                "Prekė šiuo metu ruošiama. Netrukus ją atsiųsime."
             )
 
+            await query.edit_message_text(
+                f"⚠️ Užsakymas #{order_id} apmokėtas, bet trūksta nuotraukų."
+            )
 
-async def photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+        return
+
+    if data.startswith("reject_"):
+        order_id = int(data.split("_")[1])
+
+        with connect() as db:
+            order = db.execute(
+                "SELECT user_id, status FROM orders WHERE id=?",
+                (order_id,)
+            ).fetchone()
+
+            if not order:
+                return
+
+            customer_id, status = order
+
+            if status != "LAUKIA APMOKĖJIMO":
+                await query.edit_message_text(
+                    f"Užsakymas jau apdorotas: {status}"
+                )
+                return
+
+            db.execute(
+                "UPDATE orders SET status=? WHERE id=?",
+                ("ATMESTA", order_id)
+            )
+
+        await context.bot.send_message(
+            customer_id,
+            f"❌ Jūsų užsakymas #{order_id} atmestas. "
+            "Susisiekite su administratoriumi, jei turite klausimų."
+        )
+
+        await query.edit_message_text(
+            f"❌ Užsakymas #{order_id} atmestas."
+        )
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_owner(user_id):
         return
 
     category = context.user_data.get("upload_category")
 
     if not category:
         await update.message.reply_text(
-            "Pirmiausia pasirinkite nuotraukų kategoriją."
+            "Pirmiausia pasirinkite prekių kategoriją per /admin."
         )
         return
 
-    try:
-        telegram_file = await update.message.photo[-1].get_file()
-        image_data = await telegram_file.download_as_bytearray()
+    photo = update.message.photo[-1]
+    telegram_file = await photo.get_file()
 
-        path = f"{category}/{update.message.photo[-1].file_unique_id}.jpg"
+    filename = f"{photo.file_unique_id}.jpg"
+    path = PHOTO_DIR / filename
 
-        supabase.storage.from_(BUCKET).upload(
-            path,
-            bytes(image_data),
-            file_options={
-                "content-type": "image/jpeg",
-                "upsert": "false"
-            }
+    await telegram_file.download_to_drive(path)
+
+    with connect() as db:
+        db.execute(
+            "INSERT INTO stock (category, filename) VALUES (?, ?)",
+            (category, filename)
         )
 
-        supabase.table("stock").insert({
-            "category": category,
-            "storage_path": path
-        }).execute()
-
-        await update.message.reply_text(
-            "✅ Nuotrauka saugiai pridėta į atsargas!"
-        )
-
-    except Exception:
-        logging.exception("Photo upload failed")
-        await update.message.reply_text(
-            "❌ Nepavyko įkelti nuotraukos. Patikrinkite atsargas ir nustatymus."
-        )
+    await update.message.reply_text(
+        f"✅ Nuotrauka pridėta prie {PRODUCTS[category][0]} atsargų!"
+    )
 
 
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    message = update.message
 
-    if text == "🛍️ PREKIŲ KATALOGAS":
-        await show_catalog(update)
-
-    elif text == "📦 MANO UŽSAKYMAI":
-        orders = supabase.table("orders").select("*").eq(
-            "user_id", user_id
-        ).order("id", desc=True).execute().data
-
-        if not orders:
-            await update.message.reply_text("Jūs dar neturite užsakymų.")
-            return
-
-        result = "📦 JŪSŲ UŽSAKYMAI:\n\n"
-
-        for order in orders:
-            name = PRODUCTS[order["product"]][0]
-            result += (
-                f"#{order['id']} – {name}\n"
-                f"Būsena: {order['status']}\n\n"
-            )
-
-        await update.message.reply_text(result)
-
-    elif is_admin(user_id):
-
-        if text == "📦 UŽSAKYMAI":
-            orders = supabase.table("orders").select("*").order(
-                "id", desc=True
-            ).execute().data
-
-            if not orders:
-                await update.message.reply_text("Užsakymų nėra.")
-                return
-
-            for order in orders:
-                name = PRODUCTS[order["product"]][0]
-
-                await update.message.reply_text(
-                    f"Užsakymas #{order['id']}\n"
-                    f"Klientas: {order['user_id']}\n"
-                    f"Prekė: {name}\n"
-                    f"Būsena: {order['status']}"
-                )
-
-        elif text == "📸 NUOTRAUKŲ LIKUTIS":
-            result = "📸 NUOTRAUKŲ LIKUTIS:\n\n"
-
-            for category, (name, price) in PRODUCTS.items():
-                photos = supabase.table("stock").select(
-                    "id", count="exact"
-                ).eq("category", category).execute()
-
-                result += f"{name}: {photos.count or 0} vnt.\n"
-
-            await update.message.reply_text(result)
-
-        elif text == "➕ ĮKELTI 1 💎":
-            context.user_data["upload_category"] = 1
-            await update.message.reply_text(
-                "📸 Siųskite 1 💎 kategorijos nuotraukas."
-            )
-
-        elif text == "➕ ĮKELTI 2 💎":
-            context.user_data["upload_category"] = 2
-            await update.message.reply_text(
-                "📸 Siųskite 2 💎 kategorijos nuotraukas."
-            )
-
-        elif text == "➕ ĮKELTI 5 💎":
-            context.user_data["upload_category"] = 3
-            await update.message.reply_text(
-                "📸 Siųskite 5 💎 kategorijos nuotraukas."
-            )
-
-        elif text == "⬅️ PAGRINDINIS MENIU":
-            await update.message.reply_text(
-                "Pagrindinis meniu:",
-                reply_markup=main_menu()
-            )
-
-    else:
-        orders = supabase.table("orders").select("*").eq(
-            "user_id", user_id
-        ).in_(
-            "status",
-            ["LAUKIA APMOKĖJIMO", "APMOKĖTA – LAUKIA PREKĖS"]
-        ).order("id", desc=True).execute().data
-
-        if orders:
-            order_id = orders[0]["id"]
-
-            await context.bot.send_message(
-                OWNER_ID,
-                f"💬 Kliento žinutė (užsakymas #{order_id})\n"
-                f"Klientas: {user_id}\n\n{text}"
-            )
-
-            await update.message.reply_text(
-                "✅ Jūsų žinutė išsiųsta parduotuvei."
-            )
-        else:
-            await update.message.reply_text(
-                "Pasirinkite veiksmą iš meniu.",
-                reply_markup=main_menu()
-            )
-
-
-async def reply_to_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if is_owner(user_id):
         return
 
-    parts = update.message.text.split(maxsplit=2)
+    with connect() as db:
+        order = db.execute(
+            "SELECT id FROM orders WHERE user_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
 
-    if len(parts) < 3:
+    if not order:
+        await message.reply_text(
+            "Norėdami susisiekti su administratoriumi, pirmiausia sukurkite užsakymą."
+        )
+        return
+
+    order_id = order[0]
+
+    try:
+        await context.bot.send_message(
+            OWNER_ID,
+            f"💬 KLIENTO ŽINUTĖ\n"
+            f"Užsakymas: #{order_id}\n"
+            f"Kliento ID: {user_id}\n\n"
+            f"{message.text or '[Netekstinė žinutė]'}\n\n"
+            f"Atsakyti: /reply {order_id} jūsų žinutė"
+        )
+
+        await message.reply_text("✅ Jūsų žinutė išsiųsta administratoriui.")
+
+    except Exception:
+        await message.reply_text("Nepavyko išsiųsti žinutės. Bandykite vėliau.")
+
+
+async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+
+    if len(context.args) < 2:
         await update.message.reply_text(
-            "Naudojimas: /reply UŽSAKYMO_ID Jūsų žinutė"
+            "Naudojimas: /reply UŽSAKYMO_ID jūsų žinutė"
         )
         return
 
     try:
-        order_id = int(parts[1])
-        message = parts[2]
+        order_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Neteisingas užsakymo numeris.")
+        return
 
-        order = supabase.table("orders").select("*").eq(
-            "id", order_id
-        ).execute().data
+    text = " ".join(context.args[1:])
 
-        if not order:
-            await update.message.reply_text("Užsakymas nerastas.")
-            return
+    with connect() as db:
+        order = db.execute(
+            "SELECT user_id FROM orders WHERE id=?",
+            (order_id,)
+        ).fetchone()
 
-        await context.bot.send_message(
-            order[0]["user_id"],
-            f"💎 LEDAS parduotuvė:\n\n{message}"
-        )
+    if not order:
+        await update.message.reply_text("Užsakymas nerastas.")
+        return
 
-        await update.message.reply_text("✅ Žinutė išsiųsta klientui.")
+    await context.bot.send_message(
+        order[0],
+        f"💬 LEDAS ADMINISTRATORIUS:\n\n{text}"
+    )
 
-    except Exception:
-        await update.message.reply_text("❌ Nepavyko išsiųsti žinutės.")
+    await update.message.reply_text("✅ Žinutė išsiųsta klientui.")
 
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN nenustatytas!")
+
+    setup_database()
+
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("reply", reply_to_customer))
+    app.add_handler(CommandHandler("reply", reply_command))
 
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_upload))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, messages)
-    )
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
-    port = int(os.environ.get("PORT", "10000"))
-    url = os.environ.get("RENDER_EXTERNAL_URL")
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        message_handler
+    ))
 
-    if url:
+    port = int(os.getenv("PORT", "10000"))
+    external_url = os.getenv("RENDER_EXTERNAL_URL")
+
+    if external_url:
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
-            url_path="telegram",
-            webhook_url=f"{url}/telegram"
+            url_path=BOT_TOKEN,
+            webhook_url=f"{external_url}/{BOT_TOKEN}",
+            secret_token=None
         )
     else:
         app.run_polling()
