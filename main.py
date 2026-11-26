@@ -96,6 +96,23 @@ def setup_database():
             )
         """)
 
+        # Asmeninis STASH
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS stash (
+                product_id INTEGER PRIMARY KEY,
+                quantity INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        for product_id in PRODUCTS:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO stash (product_id, quantity)
+                VALUES (?, 0)
+                """,
+                (product_id,)
+            )
+
         add_column_if_missing(db, "orders", "location", "TEXT")
         add_column_if_missing(db, "orders", "stock_id", "INTEGER")
         add_column_if_missing(db, "stock", "location", "TEXT")
@@ -166,6 +183,95 @@ def get_stock_counts(location=None):
     return dict(counts)
 
 
+# STASH FUNKCIJOS
+
+def get_stash_counts():
+    with connect() as db:
+        rows = db.execute(
+            """
+            SELECT product_id, quantity
+            FROM stash
+            """
+        ).fetchall()
+
+    return dict(rows)
+
+
+def update_stash(product_id, quantity):
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO stash (product_id, quantity)
+            VALUES (?, ?)
+            ON CONFLICT(product_id)
+            DO UPDATE SET quantity=excluded.quantity
+            """,
+            (product_id, quantity)
+        )
+
+
+def decrease_stash(product_id):
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE stash
+            SET quantity = quantity - 1
+            WHERE product_id=?
+            """,
+            (product_id,)
+        )
+
+
+async def show_stash(query):
+    stash_counts = get_stash_counts()
+
+    text = (
+        "💎 MANO STASH\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "Asmeniniai prekių likučiai:\n\n"
+    )
+
+    buttons = []
+
+    for product_id, (name, price) in PRODUCTS.items():
+        quantity = stash_counts.get(product_id, 0)
+
+        if quantity < 0:
+            status = "⚠️"
+        elif quantity == 0:
+            status = "❌"
+        else:
+            status = "✅"
+
+        text += f"{status} {name} – {quantity} vnt.\n"
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"✏️ KEISTI {name}",
+                callback_data=f"stash_edit_{product_id}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔄 ATNAUJINTI",
+            callback_data="stash"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ ADMIN MENIU",
+            callback_data="admin_back"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
 def location_keyboard(prefix, back_callback):
     buttons = [
         [
@@ -223,16 +329,167 @@ def admin_keyboard():
             callback_data="stock"
         )],
         [InlineKeyboardButton(
+            "🏪 PARDUOTUVĖS LIKUTIS",
+            callback_data="total_stock"
+        )],
+        [InlineKeyboardButton(
+            "💎 MANO STASH",
+            callback_data="stash"
+        )],
+        [InlineKeyboardButton(
             "📍 VIETŲ VALDYMAS",
             callback_data="location_management"
         )],
+        [InlineKeyboardButton(
+            "👥 KLIENTAI",
+            callback_data="admin_customers"
+        )],
     ])
+
+
+# KLIENTŲ SĄRAŠAS ADMINISTRATORIUI
+
+async def show_customers(query, page=0):
+    per_page = 10
+    offset = page * per_page
+
+    with connect() as db:
+        total = db.execute(
+            "SELECT COUNT(*) FROM customers"
+        ).fetchone()[0]
+
+        counts = db.execute("""
+            SELECT status, COUNT(*)
+            FROM customers
+            GROUP BY status
+        """).fetchall()
+
+        customers = db.execute(
+            """
+            SELECT user_id, status, username, first_name
+            FROM customers
+            ORDER BY created_at DESC, user_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (per_page, offset)
+        ).fetchall()
+
+    status_counts = dict(counts)
+
+    approved = status_counts.get("approved", 0)
+    pending = status_counts.get("pending", 0)
+    rejected = status_counts.get("rejected", 0)
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    if page >= total_pages:
+        page = total_pages - 1
+        offset = page * per_page
+
+        with connect() as db:
+            customers = db.execute(
+                """
+                SELECT user_id, status, username, first_name
+                FROM customers
+                ORDER BY created_at DESC, user_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (per_page, offset)
+            ).fetchall()
+
+    text = (
+        "👥 PEPSI KLIENTAI\n\n"
+        f"Viso klientų: {total}\n"
+        f"🟢 Patvirtinti: {approved}\n"
+        f"🟡 Laukia patvirtinimo: {pending}\n"
+        f"🔴 Atmesti: {rejected}\n\n"
+        f"📄 Puslapis {page + 1} iš {total_pages}\n\n"
+    )
+
+    if not customers:
+        text += "Klientų sąrašas tuščias."
+    else:
+        for user_id, status, username, first_name in customers:
+            name = first_name or "Vardas nenurodytas"
+
+            if username:
+                username_text = f"@{username}"
+            else:
+                username_text = "Nenurodytas"
+
+            if status == "approved":
+                status_text = "🟢 PATVIRTINTAS"
+            elif status == "pending":
+                status_text = "🟡 LAUKIA PATVIRTINIMO"
+            elif status == "rejected":
+                status_text = "🔴 ATMESTAS"
+            else:
+                status_text = f"⚪ {status}"
+
+            text += (
+                f"👤 {name}\n"
+                f"Telegram: {username_text}\n"
+                f"ID: {user_id}\n"
+                f"Būsena: {status_text}\n\n"
+            )
+
+    buttons = []
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ ATGAL",
+                callback_data=f"admin_customers_page_{page - 1}"
+            )
+        )
+
+    if page + 1 < total_pages:
+        navigation.append(
+            InlineKeyboardButton(
+                "TOLIAU ➡️",
+                callback_data=f"admin_customers_page_{page + 1}"
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔄 ATNAUJINTI",
+            callback_data=f"admin_customers_page_{page}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ ADMIN MENIU",
+            callback_data="admin_back"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 # KLIENTŲ PRIEIGOS PRAŠYMAI
 
 async def request_access(update, context):
     user = update.effective_user
+
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE customers
+            SET username=?, first_name=?
+            WHERE user_id=?
+            """,
+            (user.username, user.first_name, user.id)
+        )
+
     status = customer_status(user.id)
 
     if status == "approved":
@@ -484,6 +741,51 @@ async def show_location_stock(query, location):
                 InlineKeyboardButton(
                     "⬅️ VIETOS",
                     callback_data="stock"
+                )
+            ]
+        ])
+    )
+
+
+# BENDRAS PARDUOTUVĖS LIKUTIS: PARKAS + MIKRAS
+
+async def show_total_stock(query):
+    stock_counts = get_stock_counts()
+
+    text = (
+        "🏪 PARDUOTUVĖS LIKUTIS\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "Bendras PARKO ir MIKRO likutis:\n\n"
+    )
+
+    for product_id, (name, price) in PRODUCTS.items():
+        count = stock_counts.get(product_id, 0)
+
+        if count > 0:
+            status = "✅"
+        else:
+            status = "❌"
+
+        text += f"{status} {name} – {count} vnt.\n"
+
+    text += (
+        "\n━━━━━━━━━━━━━━\n"
+        "Rodomos laisvos, dar nerezervuotos prekės."
+    )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 ATNAUJINTI",
+                    callback_data="total_stock"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ ADMIN MENIU",
+                    callback_data="admin_back"
                 )
             ]
         ])
@@ -890,6 +1192,67 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(user_id):
         return
 
+    # BENDRAS PARDUOTUVĖS LIKUTIS
+
+    if data == "total_stock":
+        await show_total_stock(query)
+        return
+
+    # MANO STASH MENIU
+
+    if data == "stash":
+        await show_stash(query)
+        return
+
+    # STASH PREKĖS REDAGAVIMAS
+
+    if data.startswith("stash_edit_"):
+        try:
+            product_id = int(data.split("_")[-1])
+        except ValueError:
+            return
+
+        if product_id not in PRODUCTS:
+            return
+
+        context.user_data["stash_edit_product"] = product_id
+
+        name = PRODUCTS[product_id][0]
+        current_quantity = get_stash_counts().get(product_id, 0)
+
+        await query.edit_message_text(
+            "💎 MANO STASH\n\n"
+            f"Pasirinkta prekė: {name}\n"
+            f"Dabartinis kiekis: {current_quantity} vnt.\n\n"
+            "✏️ Įrašykite naują kiekį skaičiumi.\n"
+            "Pavyzdžiui: 10\n\n"
+            "Norėdami grįžti nieko nekeisdami, spauskite mygtuką:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ ATGAL Į STASH",
+                        callback_data="stash"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # KLIENTAI
+
+    if data == "admin_customers":
+        await show_customers(query, 0)
+        return
+
+    if data.startswith("admin_customers_page_"):
+        try:
+            page = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            return
+
+        await show_customers(query, max(0, page))
+        return
+
     # UŽSAKYMAI
 
     if data == "admin_orders":
@@ -1069,7 +1432,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # PREKIŲ LIKUTIS
+    # PREKIŲ LIKUTIS PAGAL VIETAS
 
     if data == "stock":
         await query.edit_message_text(
@@ -1241,10 +1604,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("PRISTATYTA", order_id)
             )
 
+            # Sėkmingai pristatyta prekė sumažina asmeninį STASH.
+            db.execute(
+                """
+                UPDATE stash
+                SET quantity = quantity - 1
+                WHERE product_id=?
+                """,
+                (product_id,)
+            )
+
         path.unlink(missing_ok=True)
 
         await query.edit_message_text(
-            f"✅ Užsakymas #{order_id} pristatytas."
+            f"✅ Užsakymas #{order_id} pristatytas.\n"
+            "💎 Asmeninis STASH atnaujintas."
         )
         return
 
@@ -1346,14 +1720,57 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# KLIENTŲ ŽINUTĖS
+# KLIENTŲ ŽINUTĖS IR STASH KIEKIO ĮVEDIMAS
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
     message = update.message
 
+    # ADMINISTRATORIAUS STASH KIEKIO ĮVEDIMAS
     if is_owner(user_id):
+        product_id = context.user_data.get("stash_edit_product")
+
+        if product_id is not None:
+            raw_value = (message.text or "").strip()
+
+            try:
+                quantity = int(raw_value)
+                if quantity < 0:
+                    raise ValueError
+            except ValueError:
+                await message.reply_text(
+                    "❌ Įveskite sveiką skaičių nuo 0.\n"
+                    "Pavyzdžiui: 10"
+                )
+                return
+
+            update_stash(product_id, quantity)
+            context.user_data.pop("stash_edit_product", None)
+
+            name = PRODUCTS[product_id][0]
+
+            await message.reply_text(
+                "✅ STASH atnaujintas!\n\n"
+                f"Prekė: {name}\n"
+                f"Naujas kiekis: {quantity} vnt.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "💎 ATIDARYTI MANO STASH",
+                            callback_data="stash"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ ADMIN MENIU",
+                            callback_data="admin_back"
+                        )
+                    ]
+                ])
+            )
+            return
+
         return
 
     if not has_access(user_id):
@@ -1363,7 +1780,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Žinutės siunčiamos administratoriui tik pradėjus pagalbos pokalbį.
     if not context.user_data.get("support_mode"):
         await message.reply_text(
             "Norėdami susisiekti su administratoriumi, "
