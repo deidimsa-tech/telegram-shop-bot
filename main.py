@@ -20,7 +20,6 @@ PHOTO_DIR = DATA_DIR / "photos"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
-# Esamos duomenų bazės pavadinimas nekeičiamas.
 DB = DATA_DIR / "ledas.db"
 
 
@@ -97,16 +96,13 @@ def setup_database():
             )
         """)
 
-        # Nauji laukai vietų ir rezervacijų valdymui.
         add_column_if_missing(db, "orders", "location", "TEXT")
         add_column_if_missing(db, "orders", "stock_id", "INTEGER")
-
         add_column_if_missing(db, "stock", "location", "TEXT")
         add_column_if_missing(
             db, "stock", "reserved_order_id", "INTEGER"
         )
 
-        # Esami klientai išsaugo savo prieigą.
         db.execute("""
             INSERT OR IGNORE INTO customers
                 (user_id, status)
@@ -205,6 +201,10 @@ def main_keyboard():
             "📦 MANO UŽSAKYMAI",
             callback_data="myorders"
         )],
+        [InlineKeyboardButton(
+            "🆘 PAGALBA",
+            callback_data="help"
+        )],
     ])
 
 
@@ -226,13 +226,158 @@ def admin_keyboard():
             "📍 VIETŲ VALDYMAS",
             callback_data="location_management"
         )],
+        [InlineKeyboardButton(
+            "👥 KLIENTAI",
+            callback_data="admin_customers"
+        )],
     ])
+
+
+# KLIENTŲ SĄRAŠAS ADMINISTRATORIUI
+
+async def show_customers(query, page=0):
+    per_page = 10
+    offset = page * per_page
+
+    with connect() as db:
+        total = db.execute(
+            "SELECT COUNT(*) FROM customers"
+        ).fetchone()[0]
+
+        counts = db.execute("""
+            SELECT status, COUNT(*)
+            FROM customers
+            GROUP BY status
+        """).fetchall()
+
+        customers = db.execute(
+            """
+            SELECT user_id, status, username, first_name
+            FROM customers
+            ORDER BY created_at DESC, user_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (per_page, offset)
+        ).fetchall()
+
+    status_counts = dict(counts)
+
+    approved = status_counts.get("approved", 0)
+    pending = status_counts.get("pending", 0)
+    rejected = status_counts.get("rejected", 0)
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    if page >= total_pages:
+        page = total_pages - 1
+        offset = page * per_page
+
+        with connect() as db:
+            customers = db.execute(
+                """
+                SELECT user_id, status, username, first_name
+                FROM customers
+                ORDER BY created_at DESC, user_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (per_page, offset)
+            ).fetchall()
+
+    text = (
+        "👥 PEPSI KLIENTAI\n\n"
+        f"Viso klientų: {total}\n"
+        f"🟢 Patvirtinti: {approved}\n"
+        f"🟡 Laukia patvirtinimo: {pending}\n"
+        f"🔴 Atmesti: {rejected}\n\n"
+        f"📄 Puslapis {page + 1} iš {total_pages}\n\n"
+    )
+
+    if not customers:
+        text += "Klientų sąrašas tuščias."
+    else:
+        for user_id, status, username, first_name in customers:
+            name = first_name or "Vardas nenurodytas"
+
+            if username:
+                username_text = f"@{username}"
+            else:
+                username_text = "Nenurodytas"
+
+            if status == "approved":
+                status_text = "🟢 PATVIRTINTAS"
+            elif status == "pending":
+                status_text = "🟡 LAUKIA PATVIRTINIMO"
+            elif status == "rejected":
+                status_text = "🔴 ATMESTAS"
+            else:
+                status_text = f"⚪ {status}"
+
+            text += (
+                f"👤 {name}\n"
+                f"Telegram: {username_text}\n"
+                f"ID: {user_id}\n"
+                f"Būsena: {status_text}\n\n"
+            )
+
+    buttons = []
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ ATGAL",
+                callback_data=f"admin_customers_page_{page - 1}"
+            )
+        )
+
+    if page + 1 < total_pages:
+        navigation.append(
+            InlineKeyboardButton(
+                "TOLIAU ➡️",
+                callback_data=f"admin_customers_page_{page + 1}"
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔄 ATNAUJINTI",
+            callback_data=f"admin_customers_page_{page}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ ADMIN MENIU",
+            callback_data="admin_back"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 # KLIENTŲ PRIEIGOS PRAŠYMAI
 
 async def request_access(update, context):
     user = update.effective_user
+
+    # Atnaujiname jau užregistruoto kliento duomenis.
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE customers
+            SET username=?, first_name=?
+            WHERE user_id=?
+            """,
+            (user.username, user.first_name, user.id)
+        )
+
     status = customer_status(user.id)
 
     if status == "approved":
@@ -566,9 +711,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # PAGALBOS POKALBIO PRADŽIA
+
+    if data == "help":
+        context.user_data["support_mode"] = True
+
+        await query.edit_message_text(
+            "🆘 PEPSI PAGALBA\n\n"
+            "Parašykite savo klausimą arba problemą.\n\n"
+            "Jūsų žinutę gaus administratorius ir galės jums atsakyti.\n\n"
+            "Norėdami baigti pokalbį, spauskite mygtuką žemiau.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔚 BAIGTI POKALBĮ",
+                        callback_data="help_done"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # PAGALBOS POKALBIO PABAIGA
+
+    if data == "help_done":
+        context.user_data["support_mode"] = False
+
+        await query.edit_message_text(
+            "✅ Pagalbos pokalbis baigtas.\n\n"
+            "Jeigu vėl reikės pagalbos, galėsite parašyti mums per PEPSI.",
+            reply_markup=main_keyboard()
+        )
+        return
+
     # PAGRINDINIS MENIU
 
     if data == "main_menu":
+        context.user_data["support_mode"] = False
+
         await query.edit_message_text(
             "🔵🔴 PEPSI\n\nPasirinkite, ką norite daryti:",
             reply_markup=main_keyboard()
@@ -775,7 +955,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name, price = PRODUCTS[product_id]
 
         with connect() as db:
-            # Pasirenkama viena laisva prekė būtent šioje vietoje.
             stock_item = db.execute(
                 """
                 SELECT id
@@ -854,6 +1033,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # TOLIAU – TIK ADMINISTRATORIUI
 
     if not is_owner(user_id):
+        return
+
+    # KLIENTAI
+
+    if data == "admin_customers":
+        await show_customers(query, 0)
+        return
+
+    if data.startswith("admin_customers_page_"):
+        try:
+            page = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            return
+
+        await show_customers(query, max(0, page))
         return
 
     # UŽSAKYMAI
@@ -1316,6 +1510,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user = update.effective_user
     message = update.message
 
     if is_owner(user_id):
@@ -1323,48 +1518,89 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not has_access(user_id):
         await message.reply_text(
-            "⏳ Norėdami rašyti administratoriui arba naudotis parduotuve, "
+            "⏳ Norėdami naudotis PEPSI pagalba, "
             "pirmiausia gaukite prieigos patvirtinimą."
         )
         return
 
-    with connect() as db:
-        order = db.execute(
-            "SELECT id FROM orders WHERE user_id=? "
-            "ORDER BY id DESC LIMIT 1",
-            (user_id,)
-        ).fetchone()
-
-    if not order:
+    if not context.user_data.get("support_mode"):
         await message.reply_text(
             "Norėdami susisiekti su administratoriumi, "
-            "pirmiausia sukurkite užsakymą."
+            "paspauskite 🆘 PAGALBA pagrindiniame meniu."
         )
         return
 
-    order_id = order[0]
+    customer_name = user.first_name or "Nenurodytas"
+    username = f"@{user.username}" if user.username else "Nenurodytas"
+
+    message_text = message.text or "[Netekstinė žinutė]"
 
     try:
         await context.bot.send_message(
             OWNER_ID,
-            f"💬 KLIENTO ŽINUTĖ\n"
-            f"Užsakymas: #{order_id}\n"
+            "💬 KLIENTO ŽINUTĖ\n\n"
+            f"Vardas: {customer_name}\n"
+            f"Naudotojo vardas: {username}\n"
             f"Kliento ID: {user_id}\n\n"
-            f"{message.text or '[Netekstinė žinutė]'}\n\n"
-            f"Atsakyti: /reply {order_id} jūsų žinutė"
+            f"Žinutė:\n{message_text}\n\n"
+            f"Atsakyti:\n/replyuser {user_id} jūsų žinutė"
         )
 
         await message.reply_text(
-            "✅ Jūsų žinutė išsiųsta administratoriui."
+            "✅ Jūsų žinutė išsiųsta administratoriui.\n\n"
+            "Kai administratorius atsakys, gausite pranešimą čia."
         )
 
     except Exception:
         await message.reply_text(
-            "Nepavyko išsiųsti žinutės. Bandykite vėliau."
+            "❌ Nepavyko išsiųsti žinutės. Bandykite vėliau."
         )
 
 
-# ADMINISTRATORIAUS ATSAKYMAS
+# ADMINISTRATORIAUS ATSAKYMAS KLIENTUI
+
+async def reply_user_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if not is_owner(update.effective_user.id):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Naudojimas:\n"
+            "/replyuser KLIENTO_ID jūsų žinutė"
+        )
+        return
+
+    try:
+        customer_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Neteisingas kliento ID."
+        )
+        return
+
+    text = " ".join(context.args[1:])
+
+    try:
+        await context.bot.send_message(
+            customer_id,
+            f"💬 PEPSI ADMINISTRATORIUS:\n\n{text}"
+        )
+
+        await update.message.reply_text(
+            "✅ Atsakymas išsiųstas klientui."
+        )
+
+    except Exception:
+        await update.message.reply_text(
+            "❌ Nepavyko išsiųsti atsakymo. "
+            "Patikrinkite kliento ID arba ar klientas neužblokavo boto."
+        )
+
+
+# SENAS ATSAKYMO BŪDAS PAGAL UŽSAKYMĄ
 
 async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
@@ -1396,14 +1632,20 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Užsakymas nerastas.")
         return
 
-    await context.bot.send_message(
-        order[0],
-        f"💬 PEPSI:\n\n{text}"
-    )
+    try:
+        await context.bot.send_message(
+            order[0],
+            f"💬 PEPSI:\n\n{text}"
+        )
 
-    await update.message.reply_text(
-        "✅ Žinutė išsiųsta klientui."
-    )
+        await update.message.reply_text(
+            "✅ Žinutė išsiųsta klientui."
+        )
+
+    except Exception:
+        await update.message.reply_text(
+            "❌ Nepavyko išsiųsti žinutės."
+        )
 
 
 # BOTO PALEIDIMAS
@@ -1419,6 +1661,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("reply", reply_command))
+    app.add_handler(CommandHandler("replyuser", reply_user_command))
 
     app.add_handler(CallbackQueryHandler(callback_handler))
 
