@@ -96,6 +96,24 @@ def setup_database():
             )
         """)
 
+        # Asmeninis STASH
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS stash (
+                product_id INTEGER PRIMARY KEY,
+                quantity INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        # Sukuriami pradiniai visų prekių įrašai.
+        for product_id in PRODUCTS:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO stash (product_id, quantity)
+                VALUES (?, 0)
+                """,
+                (product_id,)
+            )
+
         add_column_if_missing(db, "orders", "location", "TEXT")
         add_column_if_missing(db, "orders", "stock_id", "INTEGER")
         add_column_if_missing(db, "stock", "location", "TEXT")
@@ -166,6 +184,95 @@ def get_stock_counts(location=None):
     return dict(counts)
 
 
+# STASH FUNKCIJOS
+
+def get_stash_counts():
+    with connect() as db:
+        rows = db.execute(
+            """
+            SELECT product_id, quantity
+            FROM stash
+            """
+        ).fetchall()
+
+    return dict(rows)
+
+
+def update_stash(product_id, quantity):
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO stash (product_id, quantity)
+            VALUES (?, ?)
+            ON CONFLICT(product_id)
+            DO UPDATE SET quantity=excluded.quantity
+            """,
+            (product_id, quantity)
+        )
+
+
+def decrease_stash(product_id):
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE stash
+            SET quantity = quantity - 1
+            WHERE product_id=?
+            """,
+            (product_id,)
+        )
+
+
+async def show_stash(query):
+    stash_counts = get_stash_counts()
+
+    text = (
+        "💎 MANO STASH\n"
+        "━━━━━━━━━━━━━━\n\n"
+        "Asmeniniai prekių likučiai:\n\n"
+    )
+
+    buttons = []
+
+    for product_id, (name, price) in PRODUCTS.items():
+        quantity = stash_counts.get(product_id, 0)
+
+        if quantity < 0:
+            status = "⚠️"
+        elif quantity == 0:
+            status = "❌"
+        else:
+            status = "✅"
+
+        text += f"{status} {name} – {quantity} vnt.\n"
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"✏️ KEISTI {name}",
+                callback_data=f"stash_edit_{product_id}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔄 ATNAUJINTI",
+            callback_data="stash"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ ADMIN MENIU",
+            callback_data="admin_back"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
 def location_keyboard(prefix, back_callback):
     buttons = [
         [
@@ -221,6 +328,10 @@ def admin_keyboard():
         [InlineKeyboardButton(
             "📊 PREKIŲ LIKUTIS",
             callback_data="stock"
+        )],
+        [InlineKeyboardButton(
+            "💎 MANO STASH",
+            callback_data="stash"
         )],
         [InlineKeyboardButton(
             "📍 VIETŲ VALDYMAS",
@@ -367,7 +478,6 @@ async def show_customers(query, page=0):
 async def request_access(update, context):
     user = update.effective_user
 
-    # Atnaujiname jau užregistruoto kliento duomenis.
     with connect() as db:
         db.execute(
             """
@@ -1035,6 +1145,46 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(user_id):
         return
 
+    # MANO STASH MENIU
+
+    if data == "stash":
+        await show_stash(query)
+        return
+
+    # STASH PREKĖS REDAGAVIMAS
+
+    if data.startswith("stash_edit_"):
+        try:
+            product_id = int(data.split("_")[-1])
+        except ValueError:
+            return
+
+        if product_id not in PRODUCTS:
+            return
+
+        context.user_data["stash_edit_product"] = product_id
+
+        name = PRODUCTS[product_id][0]
+        current_quantity = get_stash_counts().get(product_id, 0)
+
+        await query.edit_message_text(
+            "💎 MANO STASH\n\n"
+            f"Pasirinkta prekė: {name}\n"
+            f"Dabartinis kiekis: {current_quantity} vnt.\n\n"
+            "✏️ Įrašykite naują kiekį skaičiumi.\n"
+            "Pavyzdžiui: 10\n\n"
+            "Norėdami grįžti nieko nekeisdami, spauskite mygtuką:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ ATGAL Į STASH",
+                        callback_data="stash"
+                    )
+                ]
+            ])
+        )
+        return
+
     # KLIENTAI
 
     if data == "admin_customers":
@@ -1401,10 +1551,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("PRISTATYTA", order_id)
             )
 
+            # Sėkmingai pristatyta prekė sumažina ir asmeninį STASH.
+            db.execute(
+                """
+                UPDATE stash
+                SET quantity = quantity - 1
+                WHERE product_id=?
+                """,
+                (product_id,)
+            )
+
         path.unlink(missing_ok=True)
 
         await query.edit_message_text(
-            f"✅ Užsakymas #{order_id} pristatytas."
+            f"✅ Užsakymas #{order_id} pristatytas.\n"
+            "💎 Asmeninis STASH atnaujintas."
         )
         return
 
@@ -1506,14 +1667,57 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# KLIENTŲ ŽINUTĖS
+# KLIENTŲ ŽINUTĖS IR STASH KIEKIO ĮVEDIMAS
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
     message = update.message
 
+    # ADMINISTRATORIAUS STASH KIEKIO ĮVEDIMAS
     if is_owner(user_id):
+        product_id = context.user_data.get("stash_edit_product")
+
+        if product_id is not None:
+            raw_value = (message.text or "").strip()
+
+            try:
+                quantity = int(raw_value)
+                if quantity < 0:
+                    raise ValueError
+            except ValueError:
+                await message.reply_text(
+                    "❌ Įveskite sveiką skaičių nuo 0.\n"
+                    "Pavyzdžiui: 10"
+                )
+                return
+
+            update_stash(product_id, quantity)
+            context.user_data.pop("stash_edit_product", None)
+
+            name = PRODUCTS[product_id][0]
+
+            await message.reply_text(
+                "✅ STASH atnaujintas!\n\n"
+                f"Prekė: {name}\n"
+                f"Naujas kiekis: {quantity} vnt.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "💎 ATIDARYTI MANO STASH",
+                            callback_data="stash"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ ADMIN MENIU",
+                            callback_data="admin_back"
+                        )
+                    ]
+                ])
+            )
+            return
+
         return
 
     if not has_access(user_id):
